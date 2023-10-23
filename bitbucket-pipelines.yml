@@ -1,0 +1,16 @@
+image: atlassian/default-image:3
+
+doMirror: &doMirror
+  name: Mirror repository
+  clone:
+    enabled: false
+  script:
+    - git clone --mirror git@bitbucket.org:${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}.git
+    - cd ${BITBUCKET_REPO_SLUG}.git
+    - git push --mirror git@github.com:${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}.git
+
+pipelines:
+  branches:
+    '**':
+      - step:
+          <<: *doMirror
