@@ -1,0 +1,45 @@
+plugins {
+  id "com.github.johnrengelman.shadow" version "8.1.1"
+}
+
+apply plugin: 'java-library'
+apply plugin: 'eclipse'
+apply plugin: 'maven-publish'
+apply plugin: 'com.github.johnrengelman.shadow'
+
+repositories {
+  jcenter()
+  maven { url "https://jitpack.io" }
+}
+
+group = prjGroup
+version = prjVer
+sourceCompatibility = prjCompat
+targetCompatibility = prjCompat
+
+dependencies {
+  implementation 'dev.samstevens.totp:totp:1.7.1'
+  implementation 'org.bouncycastle:bcprov-jdk18on:1.76'
+  implementation 'org.slf4j:slf4j-api:2.0.9'
+  testImplementation 'org.easymock:easymock:4.3'
+  testImplementation 'org.powermock:powermock-api-easymock:2.0.9'
+  testImplementation 'org.powermock:powermock-module-testng:2.0.9'
+  testImplementation 'org.testng:testng:7.4.0'
+}
+
+eclipse {
+  classpath {
+    downloadJavadoc = true
+    downloadSources = true
+  }
+}
+
+shadowJar {
+  archiveBaseName.set(prjName)
+  archiveClassifier.set('')
+  archiveVersion.set('')
+}
+
+artifacts {
+  archives shadowJar
+}
