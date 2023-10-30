@@ -16,6 +16,7 @@
 package com.axonibyte.lib.auth;
 
 import java.nio.ByteBuffer;
+import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.UUID;
 
@@ -24,6 +25,9 @@ import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
 import org.bouncycastle.crypto.Signer;
+import org.bouncycastle.crypto.generators.Ed25519KeyPairGenerator;
+import org.bouncycastle.crypto.params.Ed25519KeyGenerationParameters;
+import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters;
 import org.bouncycastle.crypto.signers.Ed25519Signer;
 import org.bouncycastle.util.encoders.Base32;
@@ -62,6 +66,7 @@ public class Credentialed {
   
   private UUID id = null;
   private byte[] pubkey = null;
+  private byte[] privkey = null;
   private byte[] mfakey = null;
 
   /**
@@ -71,9 +76,10 @@ public class Credentialed {
    * @param pubkey the user's public key
    * @param mfakey the user's encrypted mfakey
    */
-  public Credentialed(UUID id, byte[] pubkey, byte[] mfakey) {
+  public Credentialed(UUID id, byte[] pubkey, byte[] privkey, byte[] mfakey) {
     this.id = id;
     this.pubkey = pubkey;
+    this.privkey = privkey;
     this.mfakey = mfakey;
   }
 
@@ -87,6 +93,33 @@ public class Credentialed {
   }
 
   /**
+   * Retrieves the user's public key.
+   *
+   * @return a byte array representing the user's public key
+   */
+  public byte[] getPubkey() {
+    return null == pubkey ? null : Arrays.copyOf(pubkey, pubkey.length);
+  }
+
+  /**
+   * Retrieves the user's private key, encrypted.
+   *
+   * @return a byte array representing the user's private key
+   */
+  public byte[] getEncPrivkey() {
+    return null == privkey ? null : Arrays.copyOf(privkey, privkey.length);
+  }
+
+  /**
+   * Retrieves the user's MFA secret, encrypted.
+   *
+   * @return a byte array representing the user's encrypted MFA secret
+   */
+  public byte[] getEncMFASecret() {
+    return null == mfakey ? null : Arrays.copyOf(mfakey, mfakey.length);
+  }
+
+  /**
    * Verifies a message and signature against this user's public key to ensure
    * that this user is responsible for sending the message.
    *
@@ -94,7 +127,7 @@ public class Credentialed {
    * @param sig the message signature
    * @return true iff the signature is valid and verified
    */
-  public boolean verifySig(String message, String sig) throws Exception {
+  public boolean verifySig(String message, String sig) {
     byte[] msgBuf = message.getBytes();
     byte[] sigBuf = Base64.decode(sig);
     
@@ -102,6 +135,29 @@ public class Credentialed {
     verifier.init(false, new Ed25519PublicKeyParameters(this.pubkey));
     verifier.update(msgBuf, 0, msgBuf.length);
     return verifier.verifySignature(sigBuf);
+  }
+
+  /**
+   * Signs a message with the user's private key, if it exists.
+   *
+   * @param message the message data to be signed
+   * @return a Base64-encoded signature
+   */
+  public String sign(String message) {
+    if(null == privkey) return "";
+    byte[] msgBuf = message.getBytes();
+
+    try {
+      Signer signer = new Ed25519Signer();
+      signer.init(
+          true,
+          new Ed25519PublicKeyParameters(
+              cryptop(this.privkey, false)));
+      signer.update(msgBuf, 0, msgBuf.length);
+      return new String(Base64.encode(signer.generateSignature()));
+    } catch(Exception e) {
+      throw new RuntimeException("Failed to sign message", e);
+    }
   }
 
   /**
@@ -122,29 +178,15 @@ public class Credentialed {
     if(null == this.mfakey && (null == totp || totp.isBlank())) return true;
     if(null == this.mfakey) return false;
     
-    try {
-      final Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding", "BC");
-      var key = new SecretKeySpec(globalMFASecret, "AES");
-      
-      ByteBuffer idBuf = ByteBuffer.wrap(new byte[16]);
-      idBuf.putLong(id.getMostSignificantBits());
-      idBuf.putLong(id.getLeastSignificantBits());
-      var iv = new IvParameterSpec(idBuf.array());
-      
-      cipher.init(Cipher.DECRYPT_MODE, key, iv);
-      var mfakey = new String(
-          Base32.encode(
-              cipher.doFinal(
-                  this.mfakey)));
-      
-      final TimeProvider timeProvider = new SystemTimeProvider();
-      final CodeGenerator codeGenerator = new DefaultCodeGenerator();
-      final CodeVerifier verifier = new DefaultCodeVerifier(codeGenerator, timeProvider);
-      
-      return verifier.isValidCode(mfakey, totp);
-    } catch(Exception e) {
-      throw new RuntimeException("Failed to verify TOTP", e);
-    }
+    final TimeProvider timeProvider = new SystemTimeProvider();
+    final CodeGenerator codeGenerator = new DefaultCodeGenerator();
+    final CodeVerifier verifier = new DefaultCodeVerifier(codeGenerator, timeProvider);
+    
+    return verifier.isValidCode(
+        new String(
+            Base32.encode(
+                cryptop(this.mfakey, false))),
+        totp);
   }
 
   /**
@@ -155,26 +197,7 @@ public class Credentialed {
    */
   public boolean setMFAKey(String mfakey) throws DecoderException {
     byte[] prev = this.mfakey;
-    
-    if(null != mfakey) {
-      try {
-        final Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding", "BC");
-        var key = new SecretKeySpec(globalMFASecret, "AES");
-        
-        ByteBuffer idBuf = ByteBuffer.wrap(new byte[16]);
-        idBuf.putLong(id.getMostSignificantBits());
-        idBuf.putLong(id.getLeastSignificantBits());
-        var iv = new IvParameterSpec(idBuf.array());
-        
-        cipher.init(Cipher.ENCRYPT_MODE, key, iv);
-        this.mfakey = cipher.doFinal(Base32.decode(mfakey));
-      } catch(DecoderException e) {
-        throw e;
-      } catch(Exception e) {
-        throw new RuntimeException("Failed to encrypt new MFA key", e);
-      }
-    } else this.mfakey = null;
-    
+    this.mfakey = null == mfakey ? null : cryptop(Base32.decode(mfakey), true);
     return null == prev && null != this.mfakey
       || null != prev && null == this.mfakey
       || !Arrays.equals(prev, this.mfakey);
@@ -186,10 +209,31 @@ public class Credentialed {
    * @return the string representation of the new MFA key
    */
   public String regenerateMFAKey() {
-    try {
-      final SecretGenerator secretGenerator = new DefaultSecretGenerator();
-      String mfakey = secretGenerator.generate();
+    final SecretGenerator secretGenerator = new DefaultSecretGenerator();
+    String mfakey = secretGenerator.generate();
+    setMFAKey(mfakey);
+    return mfakey;
+  }
 
+  /**
+   * Regenerates the user's private and public keys.
+   */
+  public void regenerateKeypair() {
+    try {
+      final Ed25519KeyPairGenerator keygen = new Ed25519KeyPairGenerator();
+      keygen.init(new Ed25519KeyGenerationParameters(SecureRandom.getInstanceStrong()));
+      var keypair = keygen.generateKeyPair();
+      var privkey = new byte[32];
+      ((Ed25519PrivateKeyParameters)keypair.getPrivate()).encode(privkey, 0);
+      this.privkey = cryptop(privkey, true);
+      this.pubkey = ((Ed25519PublicKeyParameters)keypair.getPublic()).getEncoded();
+    } catch(Exception e) {
+      throw new RuntimeException("Failed to generate a new keypair", e);
+    }
+  }
+
+  private byte[] cryptop(byte[] datum, boolean encrypt) {
+    try {
       final Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding", "BC");
       var key = new SecretKeySpec(globalMFASecret, "AES");
 
@@ -198,12 +242,10 @@ public class Credentialed {
       idBuf.putLong(id.getLeastSignificantBits());
       var iv = new IvParameterSpec(idBuf.array());
 
-      cipher.init(Cipher.ENCRYPT_MODE, key, iv);
-      this.mfakey = cipher.doFinal(Base32.decode(mfakey));
-
-      return mfakey;
+      cipher.init(encrypt ? Cipher.ENCRYPT_MODE: Cipher.DECRYPT_MODE, key, iv);
+      return cipher.doFinal(datum);
     } catch(Exception e) {
-      throw new RuntimeException("Failed to regenerate MFA key", e);
+      throw new RuntimeException("Failed to encrypt user secret", e);
     }
   }
   
