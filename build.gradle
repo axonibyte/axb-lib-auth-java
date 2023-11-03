@@ -34,12 +34,14 @@ eclipse {
   }
 }
 
-shadowJar {
-  archiveBaseName.set(prjName)
-  archiveClassifier.set('')
-  archiveVersion.set('')
-}
-
 artifacts {
   archives shadowJar
+}
+
+publishing {
+  publications {
+    maven(MavenPublication) {
+      from components.java
+    }
+  }
 }
