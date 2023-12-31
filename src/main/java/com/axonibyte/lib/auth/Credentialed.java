@@ -74,6 +74,7 @@ public class Credentialed {
    *
    * @param id the user's unique identifier
    * @param pubkey the user's public key
+   * @param privkey the user's private key
    * @param mfakey the user's encrypted mfakey
    */
   public Credentialed(UUID id, byte[] pubkey, byte[] privkey, byte[] mfakey) {

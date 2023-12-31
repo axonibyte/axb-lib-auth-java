@@ -18,8 +18,8 @@ sourceCompatibility = prjCompat
 targetCompatibility = prjCompat
 
 dependencies {
-  implementation 'dev.samstevens.totp:totp:1.7.1'
-  implementation 'org.bouncycastle:bcprov-jdk18on:1.76'
+  api 'dev.samstevens.totp:totp:1.7.1'
+  api 'org.bouncycastle:bcprov-jdk18on:1.76'
   implementation 'org.slf4j:slf4j-api:2.0.9'
   testImplementation 'org.easymock:easymock:4.3'
   testImplementation 'org.powermock:powermock-api-easymock:2.0.9'
