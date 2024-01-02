@@ -16,6 +16,7 @@
 package com.axonibyte.lib.auth;
 
 import java.nio.ByteBuffer;
+import java.security.Security;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -23,6 +24,7 @@ import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.util.encoders.Base64;
 
 /**
@@ -42,6 +44,7 @@ public class SessionEngine {
    * @param gracePeriod the number of minutes during which a session key remains valid
    */
   public SessionEngine(String secret, int gracePeriod) {
+    Security.addProvider(new BouncyCastleProvider());
     byte[] buf = secret.getBytes();
     for(int i = 0; i < (this.secret.length > buf.length ? this.secret.length : buf.length); i++)
       this.secret[i % this.secret.length] ^= buf[i % buf.length];

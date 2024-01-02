@@ -17,6 +17,7 @@ package com.axonibyte.lib.auth;
 
 import java.nio.ByteBuffer;
 import java.security.SecureRandom;
+import java.security.Security;
 import java.util.Arrays;
 import java.util.UUID;
 
@@ -30,6 +31,7 @@ import org.bouncycastle.crypto.params.Ed25519KeyGenerationParameters;
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters;
 import org.bouncycastle.crypto.signers.Ed25519Signer;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.util.encoders.Base32;
 import org.bouncycastle.util.encoders.Base64;
 import org.bouncycastle.util.encoders.DecoderException;
@@ -78,6 +80,7 @@ public class Credentialed {
    * @param mfakey the user's encrypted mfakey
    */
   public Credentialed(UUID id, byte[] pubkey, byte[] privkey, byte[] mfakey) {
+    Security.addProvider(new BouncyCastleProvider());
     this.id = id;
     this.pubkey = pubkey;
     this.privkey = privkey;
