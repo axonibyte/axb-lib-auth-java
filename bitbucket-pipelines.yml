@@ -1,7 +1,7 @@
-image: atlassian/default-image:3
+image: atlassian/default-image:4
 
-doMirror: &doMirror
-  name: Mirror repository
+mirror: &mirror
+  name: mirror repo
   clone:
     enabled: false
   script:
@@ -9,8 +9,37 @@ doMirror: &doMirror
     - cd ${BITBUCKET_REPO_SLUG}.git
     - git push --mirror git@github.com:${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}.git
 
+build: &build
+  name: build and test artifacts
+  image: registry.digitalocean.com/axb/openjdk17:latest
+  caches:
+    - gradle
+  script:
+    - bash ./gradlew clean test shadowJar --info
+  artifacts:
+    - build/libs/*.jar
+
+publish: &publish
+  name: publish artifact
+  clone:
+    enabled: false
+  script:
+    - >-
+      for f in build/libs/*.jar; do
+        sha256sum $f | awk '{ print $1 }' > ${f}.sha256
+        curl -v -X POST "https://${BB_PUB_USER}:${BB_PUB_SECRET}@api.bitbucket.org/2.0/repositories/${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}/downloads" \
+            --form files=@"${f}" --form files=@"${f}.sha256"
+      done
+
 pipelines:
   branches:
     '**':
       - step:
-          <<: *doMirror
+          <<: *mirror
+    main:
+      - step:
+          <<: *mirror
+      - step:
+          <<: *build
+      - step:
+          <<: *publish
