@@ -11,7 +11,10 @@ mirror: &mirror
 
 build: &build
   name: build and test artifacts
-  image: registry.digitalocean.com/axb/openjdk17:latest
+  image:
+    name: registry.digitalocean.com/axb/openjdk17:latest
+    username: $DO_REG_SECRET
+    password: $DO_REG_SECRET
   caches:
     - gradle
   script:
