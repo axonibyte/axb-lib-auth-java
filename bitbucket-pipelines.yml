@@ -46,3 +46,7 @@ pipelines:
           <<: *build
       - step:
           <<: *publish
+  tags:
+    '**':
+      - step:
+          <<: *mirror
