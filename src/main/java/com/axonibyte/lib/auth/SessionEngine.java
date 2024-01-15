@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022-2023 Axonibyte Innovations, LLC. All rights reserved.
+ * Copyright (c) 2022-2024 Axonibyte Innovations, LLC. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -26,6 +26,8 @@ import javax.crypto.spec.SecretKeySpec;
 
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.util.encoders.Base64;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * An engine that assists in the generation and verification of session keys.
@@ -33,6 +35,8 @@ import org.bouncycastle.util.encoders.Base64;
  * @author Caleb L. Power <cpower@axonibyte.com>
  */
 public class SessionEngine {
+
+  private static final Logger logger = LoggerFactory.getLogger(SessionEngine.class);
 
   private byte[] secret = new byte[32];
   private int gracePeriod = 1;
@@ -45,9 +49,11 @@ public class SessionEngine {
    */
   public SessionEngine(String secret, int gracePeriod) {
     Security.addProvider(new BouncyCastleProvider());
-    byte[] buf = secret.getBytes();
-    for(int i = 0; i < (this.secret.length > buf.length ? this.secret.length : buf.length); i++)
-      this.secret[i % this.secret.length] ^= buf[i % buf.length];
+    if(null != secret) {
+      byte[] buf = secret.getBytes();
+      for(int i = 0; i < (this.secret.length > buf.length ? this.secret.length : buf.length); i++)
+        this.secret[i % this.secret.length] ^= buf[i % buf.length];
+    }
     this.gracePeriod = gracePeriod;
   }
 
@@ -56,8 +62,9 @@ public class SessionEngine {
    *
    * @param user the {@link UUID} associated with the user in question
    * @return some string that the user can use to maintain their session
+   * @throws CryptoException if a cryptographic error occurs
    */
-  public String generateSessionKey(UUID user) {
+  public String generateSessionKey(UUID user) throws CryptoException {
     Objects.requireNonNull(user);
     long now = System.currentTimeMillis() / 1000L;
 
@@ -76,7 +83,7 @@ public class SessionEngine {
               cipher.doFinal(userBuf.array())));
       
     } catch(Exception e) {
-      throw new RuntimeException(e);
+      throw new CryptoException("failed to encrypt session key", e);
     }
   }
 
@@ -104,7 +111,9 @@ public class SessionEngine {
         } catch(Exception e) { }
       }
     } catch(Exception e) {
-      throw new RuntimeException(e);
+      logger.error(
+          "failed to decrypt provided session key: {}",
+          null == e.getMessage() ? "no further info available" : e.getMessage());
     }
 
     return user;

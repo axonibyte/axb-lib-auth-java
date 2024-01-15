@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2023 Axonibyte Innovations, LLC. All rights reserved.
+ * Copyright (c) 2023-2024 Axonibyte Innovations, LLC. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -35,6 +35,8 @@ import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.util.encoders.Base32;
 import org.bouncycastle.util.encoders.Base64;
 import org.bouncycastle.util.encoders.DecoderException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import dev.samstevens.totp.code.CodeGenerator;
 import dev.samstevens.totp.code.CodeVerifier;
@@ -52,18 +54,27 @@ import dev.samstevens.totp.time.TimeProvider;
  * @author Caleb L. Power <cpower@axonibyte.com>
  */
 public class Credentialed {
+
+  private static final Logger logger = LoggerFactory.getLogger(Credentialed.class);
   
-  private static byte[] globalMFASecret = new byte[32];
+  private static byte[] globalSecret = new byte[32];
 
   /**
    * Sets the global secret used to encrypt MFA keys in the database.
    *
    * param secret the string representation of the MFA secret
    */
-  public static void setGlobalMFASecret(String secret) {
+  public static synchronized void setGlobalSecret(String secret) {
+    if(null == secret) {
+      Credentialed.globalSecret = null;
+      return;
+    }
+    
     byte[] buf = secret.getBytes();
-    for(int i = 0; i < (globalMFASecret.length > buf.length ? globalMFASecret.length : buf.length); i++)
-      globalMFASecret[i % globalMFASecret.length] ^= buf[i % buf.length];
+    byte[] globalSecret = new byte[32];
+    for(int i = 0; i < (globalSecret.length > buf.length ? globalSecret.length : buf.length); i++)
+      globalSecret[i % globalSecret.length] ^= buf[i % buf.length];
+    Credentialed.globalSecret = globalSecret;
   }
   
   private UUID id = null;
@@ -132,13 +143,20 @@ public class Credentialed {
    * @return true iff the signature is valid and verified
    */
   public boolean verifySig(String message, String sig) {
-    byte[] msgBuf = message.getBytes();
-    byte[] sigBuf = Base64.decode(sig);
+    try {
+      byte[] msgBuf = message.getBytes();
+      byte[] sigBuf = Base64.decode(sig);
     
-    Signer verifier = new Ed25519Signer();
-    verifier.init(false, new Ed25519PublicKeyParameters(this.pubkey));
-    verifier.update(msgBuf, 0, msgBuf.length);
-    return verifier.verifySignature(sigBuf);
+      Signer verifier = new Ed25519Signer();
+      verifier.init(false, new Ed25519PublicKeyParameters(this.pubkey));
+      verifier.update(msgBuf, 0, msgBuf.length);
+      return verifier.verifySignature(sigBuf);
+    } catch(Exception e) {
+      logger.error(
+          "cyptographic error occured whilst verifying signature: {}",
+          null == e.getMessage() ? "no further info available" : e.getMessage());
+      return false;
+    }
   }
 
   /**
@@ -146,8 +164,9 @@ public class Credentialed {
    *
    * @param message the message data to be signed
    * @return a Base64-encoded signature
+   * @throws CryptoException if the private key could not be decrypted for signing
    */
-  public String sign(String message) {
+  public String sign(String message) throws CryptoException {
     if(null == privkey) return "";
     byte[] msgBuf = message.getBytes();
 
@@ -155,12 +174,12 @@ public class Credentialed {
       Signer signer = new Ed25519Signer();
       signer.init(
           true,
-          new Ed25519PublicKeyParameters(
+          new Ed25519PrivateKeyParameters(
               cryptop(this.privkey, false)));
       signer.update(msgBuf, 0, msgBuf.length);
       return new String(Base64.encode(signer.generateSignature()));
     } catch(Exception e) {
-      throw new RuntimeException("Failed to sign message", e);
+      throw new CryptoException("failed to sign message", e);
     }
   }
 
@@ -168,9 +187,14 @@ public class Credentialed {
    * Sets the public key associated with this user.
    *
    * @param pubkey the Base64 representation of the public key
+   * @throws CryptoException if the pubkey was not a valid Base64 representation
    */
-  public void setPubkey(String pubkey) {
-    this.pubkey = Base64.decode(pubkey);
+  public void setPubkey(String pubkey) throws CryptoException {
+    try {
+      this.pubkey = Base64.decode(pubkey);
+    } catch(DecoderException e) {
+      throw new CryptoException("pubkey was not represented by valid Base64", e);
+    }
   }
 
   /**
@@ -185,12 +209,19 @@ public class Credentialed {
     final TimeProvider timeProvider = new SystemTimeProvider();
     final CodeGenerator codeGenerator = new DefaultCodeGenerator();
     final CodeVerifier verifier = new DefaultCodeVerifier(codeGenerator, timeProvider);
-    
-    return verifier.isValidCode(
-        new String(
-            Base32.encode(
-                cryptop(this.mfakey, false))),
-        totp);
+
+    try {
+      return verifier.isValidCode(
+          new String(
+              Base32.encode(
+                  cryptop(this.mfakey, false))),
+          totp);
+    } catch(CryptoException e) {
+      logger.error(
+          "MFA key decryption failed: {}",
+          null == e.getMessage() ? "no further info available" : e.getMessage());
+      return false;
+    }
   }
 
   /**
@@ -198,21 +229,27 @@ public class Credentialed {
    *
    * @param mfakey the new MFA secret
    * @return true if the new MFA key is different than the old one
+   * @throws CryptoException if the MFA key could not be decoded
    */
-  public boolean setMFAKey(String mfakey) throws DecoderException {
+  public boolean setMFAKey(String mfakey) throws CryptoException {
+    try {
     byte[] prev = this.mfakey;
     this.mfakey = null == mfakey ? null : cryptop(Base32.decode(mfakey), true);
     return null == prev && null != this.mfakey
       || null != prev && null == this.mfakey
       || !Arrays.equals(prev, this.mfakey);
+    } catch(DecoderException e) {
+      throw new CryptoException("could not decode MFA key", e);
+    }
   }
 
   /**
    * Regenerates the user's MFA key.
    *
    * @return the string representation of the new MFA key
+   * @throws CryptoException if the MFA key was badly generated
    */
-  public String regenerateMFAKey() {
+  public String regenerateMFAKey() throws CryptoException {
     final SecretGenerator secretGenerator = new DefaultSecretGenerator();
     String mfakey = secretGenerator.generate();
     setMFAKey(mfakey);
@@ -221,8 +258,10 @@ public class Credentialed {
 
   /**
    * Regenerates the user's private and public keys.
+   *
+   * @throws CryptoException if a cryptographic error occurred
    */
-  public void regenerateKeypair() {
+  public void regenerateKeypair() throws CryptoException {
     try {
       final Ed25519KeyPairGenerator keygen = new Ed25519KeyPairGenerator();
       keygen.init(new Ed25519KeyGenerationParameters(SecureRandom.getInstanceStrong()));
@@ -232,14 +271,17 @@ public class Credentialed {
       this.privkey = cryptop(privkey, true);
       this.pubkey = ((Ed25519PublicKeyParameters)keypair.getPublic()).getEncoded();
     } catch(Exception e) {
-      throw new RuntimeException("Failed to generate a new keypair", e);
+      throw new CryptoException("failed to generate a new keypair", e);
     }
   }
 
-  private byte[] cryptop(byte[] datum, boolean encrypt) {
+  private byte[] cryptop(byte[] datum, boolean encrypt) throws CryptoException {
+    if(null == globalSecret)
+      return datum;
+    
     try {
       final Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding", "BC");
-      var key = new SecretKeySpec(globalMFASecret, "AES");
+      var key = new SecretKeySpec(globalSecret, "AES");
 
       ByteBuffer idBuf = ByteBuffer.wrap(new byte[16]);
       idBuf.putLong(id.getMostSignificantBits());
@@ -249,7 +291,12 @@ public class Credentialed {
       cipher.init(encrypt ? Cipher.ENCRYPT_MODE: Cipher.DECRYPT_MODE, key, iv);
       return cipher.doFinal(datum);
     } catch(Exception e) {
-      throw new RuntimeException("Failed to encrypt user secret", e);
+      throw new CryptoException(
+          String.format(
+              "Failed to %1$s user secret (%2$s)",
+              encrypt ? "encrypt" : "decrypt",
+              null == e.getMessage() ? "no further info available" : e.getMessage()),
+          e);
     }
   }
   
