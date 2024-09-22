@@ -108,6 +108,15 @@ public class Credentialed {
   }
 
   /**
+   * Sets the ID of the credentialed user.
+   *
+   * @param id the user's unique identifier
+   */
+  protected void setID(UUID id) {
+    this.id = id;
+  }
+
+  /**
    * Retrieves the user's public key.
    *
    * @return a byte array representing the user's public key
