@@ -34,29 +34,21 @@ import dev.samstevens.totp.time.TimeProvider;
 public class CredentialedTest {
 
   /**
-   * Assert that a message can be signed by both a new Credentialed user and a
-   * reconstructed Credentialed user when there is no global secret.
+   * Assert that credential operations fail closed when no global secret is set.
    *
-   * @throws CryptoException if a cryptographic error occurred
+   * <p>This previously asserted the opposite: that a keypair could be generated and
+   * used with no global secret configured. That worked only because the encryption
+   * routine returned its input unchanged when the secret was absent, which meant the
+   * private key was written to storage in plaintext. Refusing the operation is the
+   * correct behavior, so the assertion is inverted.</p>
    */
-  @Test public void test_sign_noGlobalSecret() throws CryptoException {
-    final String plaintext = "Hello, world!";
+  @Test public void test_sign_noGlobalSecret_failsClosed() {
     final UUID credentialedID = UUID.randomUUID();
 
     Credentialed.setGlobalSecret(null);
-    
-    final Credentialed credentialed_1 = new Credentialed(credentialedID, null, null, null);
-    credentialed_1.regenerateKeypair();
-    final String sig_1 = credentialed_1.sign(plaintext);
 
-    final Credentialed credentialed_2 = new Credentialed(
-        credentialedID,
-        credentialed_1.getPubkey(),
-        credentialed_1.getEncPrivkey(),
-        null);
-    final String sig_2 = credentialed_2.sign(plaintext);
-
-    Assert.assertEquals(sig_2, sig_1);
+    final Credentialed credentialed = new Credentialed(credentialedID, null, null, null);
+    Assert.assertThrows(CryptoException.class, () -> credentialed.regenerateKeypair());
   }
 
   /**
@@ -94,7 +86,8 @@ public class CredentialedTest {
     final String plaintext = "Hello, world!";
     final UUID credentialedID = UUID.randomUUID();
 
-    Credentialed.setGlobalSecret(null);
+    // A secret is now required for any operation touching the private key.
+    Credentialed.setGlobalSecret("foo bar baz");
 
     final Credentialed credentialed_1 = new Credentialed(credentialedID, null, null, null);
     credentialed_1.regenerateKeypair();
@@ -120,7 +113,10 @@ public class CredentialedTest {
    */
   @Test public void test_verifyMFA() throws CodeGenerationException, CryptoException {
     final UUID credentialedID = UUID.randomUUID();
-    
+
+    // Set explicitly rather than inheriting whatever a previously-run test left behind.
+    Credentialed.setGlobalSecret("foo bar baz");
+
     final Credentialed credentialed_1 = new Credentialed(credentialedID, null, null, null);
     final String mfaSecret = credentialed_1.regenerateMFAKey();
 

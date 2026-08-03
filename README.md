@@ -1,6 +1,6 @@
 # Axonibyte Java Library Suite - Authentication
 
-Copyright (c) 2023 Axonibyte Innovations, LLC. All rights reserved.
+Copyright (c) 2023-2026 Axonibyte Innovations, LLC. All rights reserved.
 
 This Java library handles encryption, decryption, signing, verification, key
 expansion, and hashing for various Axonibyte and partner services. In general,
