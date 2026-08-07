@@ -17,12 +17,27 @@ version = prjVer
 sourceCompatibility = prjCompat
 targetCompatibility = prjCompat
 
+// Source and output encoding are pinned rather than inherited from the build machine's
+// locale. Without this, javac reads sources in the platform default charset, so a string
+// literal containing a non-ASCII character compiles to different bytes depending on where
+// it was built -- and CredentialedCharsetTest, whose whole job is to be trustworthy when
+// the encoding is wrong, would be the first casualty.
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+tasks.withType(Javadoc).configureEach { options.encoding = 'UTF-8' }
+
+// Pinned explicitly so the ordinary suite is deterministic, and so charsetTest below is
+// overriding a known value rather than whatever the host happened to supply.
+tasks.withType(Test).configureEach { systemProperty 'file.encoding', 'UTF-8' }
+
 dependencies {
   api 'dev.samstevens.totp:totp:1.7.1'
   api 'org.bouncycastle:bcprov-jdk18on:1.76'
   implementation 'org.slf4j:slf4j-api:2.0.9'
-  testImplementation 'org.easymock:easymock:4.3'
-  testImplementation 'org.testng:testng:7.4.0'
+  // EasyMock is gone rather than bumped: nothing in src/test imported it, and 4.3 cannot
+  // proxy classes on JDK 17+ anyway, so it was a trap rather than a tool. TestNG matches
+  // the version yasss uses; a library and its consumer disagreeing on the test framework
+  // is a debugging tax for no benefit.
+  testImplementation 'org.testng:testng:7.11.0'
 }
 
 eclipse {
@@ -49,3 +64,29 @@ test {
     suites 'src/test/resources/testng.xml'
   }
 }
+
+// Re-runs the charset-sensitive tests under a default charset that is not UTF-8, which is
+// the only way to prove the explicit StandardCharsets calls are load-bearing. Under a
+// UTF-8 default those tests pass whether or not the charset is pinned in the code, so the
+// ordinary run cannot fail for the right reason.
+//
+// jvmArgs rather than systemProperty: file.encoding is consumed during the JVM's
+// initPhase1, so it is a launch flag rather than an application property, and writing it
+// as one says so. stdout/stderr stay UTF-8 or the TestNG console output is mangled and
+// every failure looks like a harness problem.
+tasks.register('charsetTest', Test) {
+  description = 'Re-runs the charset-sensitive tests under a non-UTF-8 default charset.'
+  group = 'verification'
+  testClassesDirs = sourceSets.test.output.classesDirs
+  classpath = sourceSets.test.runtimeClasspath
+  useTestNG() {
+    suites 'src/test/resources/suites/charsetTestSuite.xml'
+  }
+  jvmArgs '-Dfile.encoding=US-ASCII', '-Dstdout.encoding=UTF-8', '-Dstderr.encoding=UTF-8'
+  // Read by the suite's @BeforeClass guard, which fails loudly if the override did not
+  // take effect -- otherwise a future JDK that stops honouring the flag turns this task
+  // into a silent duplicate of `test`.
+  systemProperty 'axb.test.charset', 'US-ASCII'
+}
+
+check.dependsOn charsetTest

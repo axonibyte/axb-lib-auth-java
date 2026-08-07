@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE suite SYSTEM "https://testng.org/testng-1.0.dtd" >
+
+<!--
+  Driven by the `charsetTest` Gradle task, which runs it under
+  -Dfile.encoding=US-ASCII. Deliberately NOT referenced from testng.xml: that file
+  drives the ordinary `test` task, and re-running the whole suite under a hostile
+  charset would drag in tests that are legitimately not charset-safe and produce
+  failures with nothing to do with the invariant under test.
+
+  CredentialedCharsetTest is listed here *and* in cryptoTestSuite.xml. It must pass
+  under both, and listing it only here would mean a plain `gradle test` never
+  exercised it at all.
+-->
+<suite name="charsetTestSuite" verbose="10">
+  <test name="charsetTest">
+    <classes>
+      <class name="com.axonibyte.lib.auth.CredentialedCharsetTest" />
+      <class name="com.axonibyte.lib.auth.CredentialedCryptoTest" />
+    </classes>
+  </test>
+</suite>
