@@ -86,6 +86,15 @@ public class Credentialed {
 
   private static final SecureRandom RANDOM = new SecureRandom();
 
+  static {
+    // Registered once at class load rather than in the constructor. Security.addProvider
+    // delegates to insertProviderAt, which is public static synchronized -- global JVM
+    // state behind a global lock. This class is a data object: yasss subclasses it as
+    // User and builds one per row, so every authenticated request and every page of a
+    // user listing was taking that lock to re-register a provider that was already there.
+    Security.addProvider(new BouncyCastleProvider());
+  }
+
   /**
    * Every key derived from one configured secret.
    *
@@ -189,7 +198,6 @@ public class Credentialed {
    * @param mfakey the user's encrypted mfakey
    */
   public Credentialed(UUID id, byte[] pubkey, byte[] privkey, byte[] mfakey) {
-    Security.addProvider(new BouncyCastleProvider());
     this.id = id;
     this.pubkey = pubkey;
     this.privkey = privkey;

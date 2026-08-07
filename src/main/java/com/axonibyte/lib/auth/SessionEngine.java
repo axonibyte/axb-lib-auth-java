@@ -38,6 +38,12 @@ public class SessionEngine {
 
   private static final Logger logger = LoggerFactory.getLogger(SessionEngine.class);
 
+  static {
+    // See Credentialed's static block: registering a provider is global synchronized JVM
+    // state and does not belong in a constructor.
+    Security.addProvider(new BouncyCastleProvider());
+  }
+
   private byte[] secret = new byte[32];
   private int gracePeriod = 1;
 
@@ -48,7 +54,6 @@ public class SessionEngine {
    * @param gracePeriod the number of minutes during which a session key remains valid
    */
   public SessionEngine(String secret, int gracePeriod) {
-    Security.addProvider(new BouncyCastleProvider());
     if(null != secret) {
       byte[] buf = secret.getBytes();
       for(int i = 0; i < (this.secret.length > buf.length ? this.secret.length : buf.length); i++)
