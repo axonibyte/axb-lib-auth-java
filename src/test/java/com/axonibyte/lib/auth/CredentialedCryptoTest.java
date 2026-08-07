@@ -179,6 +179,50 @@ public class CredentialedCryptoTest {
     Assert.assertThrows(CryptoException.class, () -> other.sign("x"));
   }
 
+  @Test public void emptySecret_isAcceptedRatherThanThrowingArithmeticException() throws Exception {
+    // The legacy XOR fold indexed buf[i % buf.length], so a zero-length secret divided by
+    // zero -- and did so *after* the current key had already been assigned, leaving the
+    // class holding a fresh key beside a stale legacy one. In yasss it surfaced as
+    // "Failed to properly launch: / by zero", which names nothing useful.
+    Credentialed.setGlobalSecret("");
+
+    UUID id = UUID.randomUUID();
+    var user = freshUser(id);
+    Assert.assertTrue(user.verifySig("still works", user.sign("still works")));
+  }
+
+  @Test public void emptySecret_leavesNoLegacyKeyToDecryptWith() throws Exception {
+    // Nothing can have been written under an empty secret, because the old code threw
+    // before it could store anything. So there is deliberately no legacy candidate, and
+    // a legacy blob must fail rather than be attempted against some improvised key.
+    UUID id = UUID.randomUUID();
+    byte[] legacyBlob = legacyEncrypt(id, new byte[32], SECRET);
+
+    Credentialed.setGlobalSecret("");
+
+    var user = new Credentialed(id, null, legacyBlob, null);
+    Assert.assertThrows(CryptoException.class, () -> user.sign("x"));
+  }
+
+  @Test public void legacyRecords_areReadUnderThePlatformDefaultCharset() throws Exception {
+    // 0.0.2 folded secret.getBytes() with no charset. Reproducing that from UTF-8 alone
+    // would strand every stored record on a host whose default is something else and
+    // whose secret is not ASCII. This passes trivially on a UTF-8 host -- charsetTest is
+    // where it has teeth. See CredentialedCharsetTest.
+    final String nonAscii = "pässwörd";
+    UUID id = UUID.randomUUID();
+    byte[] plaintext = new byte[32];
+    Arrays.fill(plaintext, (byte)0x5A);
+
+    byte[] legacyBlob = legacyEncrypt(
+        id, plaintext, nonAscii.getBytes(java.nio.charset.Charset.defaultCharset()));
+
+    Credentialed.setGlobalSecret(nonAscii);
+    var user = new Credentialed(id, null, legacyBlob, null);
+
+    Assert.assertTrue(user.migrateCredentialFormat(), "the legacy record should be readable");
+  }
+
   @Test public void noGlobalSecret_failsClosedRatherThanStoringPlaintext() {
     // Previously this returned the datum untouched, writing private keys and TOTP
     // secrets to storage in the clear.
@@ -191,7 +235,17 @@ public class CredentialedCryptoTest {
   /** Reproduces the pre-migration on-disk format: AES-GCM, XOR-folded key, UUID as IV. */
   private static byte[] legacyEncrypt(UUID id, byte[] plaintext, String secret)
       throws Exception {
-    byte[] buf = secret.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    return legacyEncrypt(
+        id, plaintext, secret.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+  }
+
+  /**
+   * As above, but over raw secret bytes, so a test can pin which charset produced them.
+   * 0.0.2 used {@code secret.getBytes()} -- the platform default -- so that distinction
+   * is the whole point of the dual-candidate legacy derivation.
+   */
+  private static byte[] legacyEncrypt(UUID id, byte[] plaintext, byte[] buf)
+      throws Exception {
     byte[] key = new byte[32];
     for(int i = 0; i < Math.max(key.length, buf.length); i++)
       key[i % key.length] ^= buf[i % buf.length];

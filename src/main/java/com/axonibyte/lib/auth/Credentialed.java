@@ -16,6 +16,7 @@
 package com.axonibyte.lib.auth;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.security.Security;
@@ -85,14 +86,29 @@ public class Credentialed {
 
   private static final SecureRandom RANDOM = new SecureRandom();
 
-  private static byte[] globalSecret = null;
+  /**
+   * Every key derived from one configured secret.
+   *
+   * <p>Grouped into a single object so that a rotation publishes all of them together.
+   * Held in three separate fields they could be observed half-updated, which for the
+   * legacy candidates means a record decrypting under the wrong secret's key -- not a
+   * successful forgery, since GCM is authenticated, but not a state anyone reasoned
+   * about either.</p>
+   *
+   * @param current the HKDF-derived key, the only one ever used to write
+   * @param legacyDefault the XOR-folded key over the platform default charset, which is
+   *        what wrote the records that predate the KDF change
+   * @param legacyUtf8 the XOR-folded key over UTF-8, or {@code null} when it would be
+   *        identical to {@code legacyDefault}
+   */
+  private record KeyMaterial(byte[] current, byte[] legacyDefault, byte[] legacyUtf8) { }
 
   /**
-   * The key derived the old way (XOR-folding the raw secret bytes). Retained solely so
-   * that records written before the KDF change can still be read and re-encrypted; it
-   * is never used to write.
+   * The keys in force. Volatile because every read below happens outside the
+   * {@code synchronized} setter, so without it there is no happens-before edge and a
+   * reader may see a stale or partially-published array.
    */
-  private static byte[] legacyGlobalSecret = null;
+  private static volatile KeyMaterial keys = null;
 
   /**
    * Sets the global secret used to encrypt private keys and MFA secrets at rest.
@@ -103,31 +119,62 @@ public class Credentialed {
    * halved its own entropy, and any secret consisting of a repeated 32-byte block
    * folded to all zeros.</p>
    *
+   * <p>Two legacy candidates are derived rather than one. The XOR fold that wrote
+   * pre-existing records ran over {@code secret.getBytes()} with no charset, i.e. the
+   * platform default; reproducing it from UTF-8 alone would leave every stored record
+   * permanently unreadable on any host whose default is something else and whose secret
+   * is not pure ASCII. The two agree for an ASCII secret, in which case only one is
+   * kept and the second trial decrypt never happens.</p>
+   *
    * @param secret the secret; {@code null} clears it, after which encryption and
    *        decryption both fail rather than silently passing data through
    */
   public static synchronized void setGlobalSecret(String secret) {
     if(null == secret) {
-      Credentialed.globalSecret = null;
-      Credentialed.legacyGlobalSecret = null;
+      Credentialed.keys = null;
       return;
     }
 
-    byte[] buf = secret.getBytes(StandardCharsets.UTF_8);
+    byte[] utf8 = secret.getBytes(StandardCharsets.UTF_8);
+    byte[] platform = secret.getBytes(Charset.defaultCharset());
 
     var hkdf = new HKDFBytesGenerator(new SHA256Digest());
-    hkdf.init(new HKDFParameters(buf, KDF_SALT, KDF_INFO));
+    hkdf.init(new HKDFParameters(utf8, KDF_SALT, KDF_INFO));
     byte[] derived = new byte[32];
     hkdf.generateBytes(derived, 0, derived.length);
-    Credentialed.globalSecret = derived;
 
-    // Reproduce the legacy derivation so pre-existing records remain readable.
-    byte[] legacy = new byte[32];
-    for(int i = 0; i < Math.max(legacy.length, buf.length); i++)
-      legacy[i % legacy.length] ^= buf[i % buf.length];
-    Credentialed.legacyGlobalSecret = legacy;
+    if(0 == utf8.length)
+      logger.warn(
+          "The configured global secret is empty. Credential material will be encrypted "
+          + "under a key derived from nothing, which is not meaningfully protected.");
+
+    Credentialed.keys = new KeyMaterial(
+        derived,
+        xorFold(platform),
+        Arrays.equals(platform, utf8) ? null : xorFold(utf8));
   }
-  
+
+  /**
+   * Reproduces the derivation used before the KDF change: the raw secret bytes folded
+   * into 32 with XOR.
+   *
+   * @param buf the raw secret bytes
+   * @return the folded key, or {@code null} for an empty secret
+   */
+  private static byte[] xorFold(byte[] buf) {
+    // An empty secret indexes buf[i % 0] and throws ArithmeticException -- which the
+    // previous implementation did too, before it had assigned the legacy key, leaving
+    // the class holding a fresh current key beside a stale legacy one. It threw under
+    // the old code as well, so no stored record can have been written this way and
+    // there is nothing to be compatible with.
+    if(0 == buf.length) return null;
+
+    byte[] folded = new byte[32];
+    for(int i = 0; i < Math.max(folded.length, buf.length); i++)
+      folded[i % folded.length] ^= buf[i % buf.length];
+    return folded;
+  }
+
   private UUID id = null;
   private byte[] pubkey = null;
   private byte[] privkey = null;
@@ -338,7 +385,7 @@ public class Credentialed {
   private byte[] cryptop(byte[] datum, boolean encrypt) throws CryptoException {
     // Previously this returned the datum untouched when no secret was configured, which
     // silently wrote private keys and TOTP secrets to storage in plaintext. Fail instead.
-    if(null == globalSecret)
+    if(null == keys)
       throw new CryptoException(
           "No global secret configured; refusing to handle credential material.", null);
 
@@ -365,7 +412,7 @@ public class Credentialed {
       final Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding", "BC");
       cipher.init(
           Cipher.ENCRYPT_MODE,
-          new SecretKeySpec(globalSecret, "AES"),
+          new SecretKeySpec(keys.current(), "AES"),
           new GCMParameterSpec(GCM_TAG_BITS, iv));
 
       byte[] ciphertext = cipher.doFinal(plaintext);
@@ -401,7 +448,7 @@ public class Credentialed {
         final Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding", "BC");
         cipher.init(
             Cipher.DECRYPT_MODE,
-            new SecretKeySpec(globalSecret, "AES"),
+            new SecretKeySpec(keys.current(), "AES"),
             new GCMParameterSpec(GCM_TAG_BITS, Arrays.copyOfRange(blob, 1, 1 + GCM_IV_BYTES)));
         return cipher.doFinal(blob, 1 + GCM_IV_BYTES, blob.length - 1 - GCM_IV_BYTES);
       } catch(Exception e) {
@@ -420,34 +467,49 @@ public class Credentialed {
    * rewrites it in the current format; see {@code CredentialMigrator}.</p>
    */
   private byte[] decryptLegacy(byte[] blob) throws CryptoException {
-    if(null == legacyGlobalSecret)
+    final KeyMaterial snapshot = keys;
+
+    if(null == snapshot || null == snapshot.legacyDefault())
       throw new CryptoException("No legacy secret available to decrypt this record.", null);
     if(null == id)
       throw new CryptoException("Legacy records require an entity ID to derive the IV.", null);
 
-    try {
-      ByteBuffer idBuf = ByteBuffer.wrap(new byte[16]);
-      idBuf.putLong(id.getMostSignificantBits());
-      idBuf.putLong(id.getLeastSignificantBits());
+    ByteBuffer idBuf = ByteBuffer.wrap(new byte[16]);
+    idBuf.putLong(id.getMostSignificantBits());
+    idBuf.putLong(id.getLeastSignificantBits());
 
-      final Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding", "BC");
-      cipher.init(
-          Cipher.DECRYPT_MODE,
-          new SecretKeySpec(legacyGlobalSecret, "AES"),
-          new IvParameterSpec(idBuf.array()));
+    Exception last = null;
 
-      byte[] plaintext = cipher.doFinal(blob);
-      logger.warn(
-          "Read a legacy fixed-IV credential record for {}; re-save it to migrate.", id);
-      return plaintext;
+    // Both candidates, because the fold that wrote these records used the platform
+    // default charset. See setGlobalSecret. The second is null for an ASCII secret,
+    // which is every deployment that has not gone out of its way.
+    for(byte[] candidate : new byte[][] { snapshot.legacyDefault(), snapshot.legacyUtf8() }) {
+      if(null == candidate) continue;
 
-    } catch(Exception e) {
-      throw new CryptoException(
-          String.format(
-              "Failed to decrypt user secret (%1$s)",
-              null == e.getMessage() ? "no further info available" : e.getMessage()),
-          e);
+      try {
+        final Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding", "BC");
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            new SecretKeySpec(candidate, "AES"),
+            new IvParameterSpec(idBuf.array()));
+
+        byte[] plaintext = cipher.doFinal(blob);
+        logger.warn(
+            "Read a legacy fixed-IV credential record for {}; re-save it to migrate.", id);
+        return plaintext;
+
+      } catch(Exception e) {
+        last = e;
+      }
     }
+
+    throw new CryptoException(
+        String.format(
+            "Failed to decrypt user secret (%1$s)",
+            null == last || null == last.getMessage()
+                ? "no further info available"
+                : last.getMessage()),
+        last);
   }
 
   /**
@@ -464,7 +526,7 @@ public class Credentialed {
       final Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding", "BC");
       cipher.init(
           Cipher.DECRYPT_MODE,
-          new SecretKeySpec(globalSecret, "AES"),
+          new SecretKeySpec(keys.current(), "AES"),
           new GCMParameterSpec(GCM_TAG_BITS, Arrays.copyOfRange(blob, 1, 1 + GCM_IV_BYTES)));
       cipher.doFinal(blob, 1 + GCM_IV_BYTES, blob.length - 1 - GCM_IV_BYTES);
       return false;
