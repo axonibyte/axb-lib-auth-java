@@ -150,6 +150,28 @@ public class CredentialedCryptoTest {
     Assert.assertEquals(migrated[0], 0x01, "migrated record should carry the version marker");
   }
 
+  @Test public void migration_leavesNothingRewrittenWhenTheSecondFieldFails() throws Exception {
+    // A readable legacy private key beside an unreadable MFA secret. The private key
+    // migrates, then the MFA secret throws. Previously the new private key had already
+    // been assigned to the field by then, and the exception carried no way to say so --
+    // so a caller that persisted the entity afterwards wrote a half-migrated record,
+    // and one that did not persist silently lost the work.
+    UUID id = UUID.randomUUID();
+    byte[] legacyPrivkey = legacyEncrypt(id, new byte[32], SECRET);
+
+    byte[] unreadable = new byte[36];
+    Arrays.fill(unreadable, (byte)0x7F);
+
+    var user = new Credentialed(id, null, legacyPrivkey, unreadable);
+    byte[] before = user.getEncPrivkey();
+
+    Assert.assertThrows(CryptoException.class, () -> user.migrateCredentialFormat());
+    Assert.assertEquals(
+        user.getEncPrivkey(),
+        before,
+        "a failed migration must leave every field exactly as it found it");
+  }
+
   @Test public void migration_isIdempotent() throws Exception {
     UUID id = UUID.randomUUID();
     var user = freshUser(id);

@@ -451,6 +451,27 @@ public class Credentialed {
    * through, because both paths are authenticated.</p>
    */
   private byte[] decrypt(byte[] blob) throws CryptoException {
+    return read(blob).plaintext();
+  }
+
+  /**
+   * The outcome of a single decryption: the plaintext, and which format produced it.
+   *
+   * @param plaintext the decrypted credential material
+   * @param wasLegacy {@code true} iff it came from the fixed-IV path
+   */
+  private record Decrypted(byte[] plaintext, boolean wasLegacy) { }
+
+  /**
+   * Decrypts once and reports which format the record was in.
+   *
+   * <p>Exists because the two questions -- "what does this say" and "does it need
+   * rewriting" -- were previously answered by separate methods that each ran their own
+   * trial decryption. Migrating a legacy record cost three cipher operations: one inside
+   * {@link #isLegacyFormat(byte[])}, one more re-running the current-format trial inside
+   * {@code decrypt}, and one for the legacy path that actually worked.</p>
+   */
+  private Decrypted read(byte[] blob) throws CryptoException {
     if(blob.length > 1 + GCM_IV_BYTES && FORMAT_VERSION == blob[0]) {
       try {
         final Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding", "BC");
@@ -458,13 +479,15 @@ public class Credentialed {
             Cipher.DECRYPT_MODE,
             new SecretKeySpec(keys.current(), "AES"),
             new GCMParameterSpec(GCM_TAG_BITS, Arrays.copyOfRange(blob, 1, 1 + GCM_IV_BYTES)));
-        return cipher.doFinal(blob, 1 + GCM_IV_BYTES, blob.length - 1 - GCM_IV_BYTES);
+        return new Decrypted(
+            cipher.doFinal(blob, 1 + GCM_IV_BYTES, blob.length - 1 - GCM_IV_BYTES),
+            false);
       } catch(Exception e) {
         // Not a current-format record after all; fall through and try the legacy path.
       }
     }
 
-    return decryptLegacy(blob);
+    return new Decrypted(decryptLegacy(blob), true);
   }
 
   /**
@@ -472,7 +495,8 @@ public class Credentialed {
    * XOR-folded key, with the account UUID as the IV.
    *
    * <p>Retained only so stored credentials survive the upgrade. Re-saving the entity
-   * rewrites it in the current format; see {@code CredentialMigrator}.</p>
+   * rewrites it in the current format. Sweeping stored records so that inactive accounts
+   * are migrated too needs database access and so belongs to the consumer, not here.</p>
    */
   private byte[] decryptLegacy(byte[] blob) throws CryptoException {
     final KeyMaterial snapshot = keys;
@@ -521,23 +545,23 @@ public class Credentialed {
   }
 
   /**
-   * Determines whether a stored blob is still in the legacy fixed-IV format and so
-   * needs re-encryption.
+   * Determines whether a stored blob needs re-encryption in the current format.
+   *
+   * <p>Note what the {@code true} answer actually means: <em>this cannot be read as a
+   * current-format record</em>. That covers a genuine legacy record, but equally a
+   * corrupt one, a truncated one, and one encrypted under a secret this process does not
+   * hold. The three are indistinguishable from here, and a caller sweeping stored records
+   * must be prepared for {@link #migrateCredentialFormat()} to throw rather than assuming
+   * a {@code true} here guarantees a readable legacy record.</p>
    *
    * @param blob the stored credential material
-   * @return {@code true} iff the blob predates the random-IV format
+   * @return {@code true} iff the blob is not readable as a current-format record
    */
   public boolean isLegacyFormat(byte[] blob) {
     if(null == blob || blob.length <= 1 + GCM_IV_BYTES || FORMAT_VERSION != blob[0])
       return true;
     try {
-      final Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding", "BC");
-      cipher.init(
-          Cipher.DECRYPT_MODE,
-          new SecretKeySpec(keys.current(), "AES"),
-          new GCMParameterSpec(GCM_TAG_BITS, Arrays.copyOfRange(blob, 1, 1 + GCM_IV_BYTES)));
-      cipher.doFinal(blob, 1 + GCM_IV_BYTES, blob.length - 1 - GCM_IV_BYTES);
-      return false;
+      return read(blob).wasLegacy();
     } catch(Exception e) {
       return true;
     }
@@ -555,22 +579,30 @@ public class Credentialed {
    * @throws CryptoException if the existing material could not be read
    */
   public boolean migrateCredentialFormat() throws CryptoException {
-    boolean migrated = false;
+    // Both values are computed before either is stored. Assigning as we went meant that a
+    // failure on the second left the first already replaced in memory, with the exception
+    // carrying no way to say so -- the caller saw only that migration had failed, and
+    // persisting the entity afterwards would have written a half-migrated record.
+    byte[] newPrivkey = null;
+    byte[] newMFAKey = null;
 
-    if(null != privkey && isLegacyFormat(privkey)) {
-      privkey = encrypt(decrypt(privkey));
-      migrated = true;
+    if(null != privkey) {
+      Decrypted read = read(privkey);
+      if(read.wasLegacy()) newPrivkey = encrypt(read.plaintext());
     }
 
-    if(null != mfakey && isLegacyFormat(mfakey)) {
-      mfakey = encrypt(decrypt(mfakey));
-      migrated = true;
+    if(null != mfakey) {
+      Decrypted read = read(mfakey);
+      if(read.wasLegacy()) newMFAKey = encrypt(read.plaintext());
     }
 
-    if(migrated)
-      logger.info("Migrated credential material for {} to the random-IV format.", id);
+    if(null == newPrivkey && null == newMFAKey) return false;
 
-    return migrated;
+    if(null != newPrivkey) privkey = newPrivkey;
+    if(null != newMFAKey) mfakey = newMFAKey;
+
+    logger.info("Migrated credential material for {} to the random-IV format.", id);
+    return true;
   }
 
 }
