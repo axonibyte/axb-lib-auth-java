@@ -78,6 +78,37 @@ public class CredentialedTest {
   }
 
   /**
+   * Assert that signing without a private key is refused rather than answered with an
+   * empty string that a caller may mistake for a signature.
+   */
+  @Test public void test_sign_noPrivateKey_throws() {
+    Credentialed.setGlobalSecret("foo bar baz");
+
+    final Credentialed credentialed = new Credentialed(UUID.randomUUID(), null, null, null);
+    Assert.assertThrows(CryptoException.class, () -> credentialed.sign("anything"));
+  }
+
+  /**
+   * Assert that verification fails closed for a public key that is absent or the wrong
+   * length, rather than relying on an NPE inside the catch-all to produce the answer.
+   */
+  @Test public void test_verifySig_malformedPubkey_isFalseNotAnError() {
+    Credentialed.setGlobalSecret("foo bar baz");
+
+    final String sig = "aGVsbG8=";
+
+    Assert.assertFalse(
+        new Credentialed(UUID.randomUUID(), null, null, null).verifySig("msg", sig),
+        "a null pubkey must verify nothing");
+    Assert.assertFalse(
+        new Credentialed(UUID.randomUUID(), new byte[16], null, null).verifySig("msg", sig),
+        "a truncated pubkey must verify nothing");
+    Assert.assertFalse(
+        new Credentialed(UUID.randomUUID(), new byte[32], null, null).verifySig("msg", null),
+        "a null signature must verify nothing");
+  }
+
+  /**
    * Assert that a signature can be verified.
    *
    * @throws CryptoException if a cryptographic error occurred

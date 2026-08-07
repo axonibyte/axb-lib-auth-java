@@ -253,11 +253,22 @@ public class Credentialed {
    * Verifies a message and signature against this user's public key to ensure
    * that this user is responsible for sending the message.
    *
+   * <p>Fails closed on every path, including a missing or malformed public key. A
+   * {@code false} here is an ordinary outcome -- an unauthenticated caller can produce
+   * one at will -- so nothing in it is logged above debug.</p>
+   *
    * @param message the message data itself
    * @param sig the message signature
    * @return true iff the signature is valid and verified
    */
   public boolean verifySig(String message, String sig) {
+    // Stated rather than left to the blanket catch below. A null pubkey used to reach
+    // Ed25519PublicKeyParameters and come back as an NPE with a null message, which was
+    // then logged as "cryptographic error ... no further info available" -- an error line
+    // per anonymous request, saying nothing.
+    if(null == message || null == sig || null == this.pubkey) return false;
+    if(Ed25519PublicKeyParameters.KEY_SIZE != this.pubkey.length) return false;
+
     try {
       // UTF-8 explicitly, not the platform default. The signing side is a browser, which
       // always signs UTF-8 bytes; before Java 18 the default here comes from the host's
@@ -272,8 +283,12 @@ public class Credentialed {
       verifier.update(msgBuf, 0, msgBuf.length);
       return verifier.verifySignature(sigBuf);
     } catch(Exception e) {
-      logger.error(
-          "cyptographic error occured whilst verifying signature: {}",
+      // Debug, not error. Both arguments come straight off the wire, so any caller could
+      // write an unbounded number of these lines by sending malformed Base64 -- a free
+      // log-flooding lever that also buries genuine faults. A signature that does not
+      // verify is a normal result of this method, not a fault in it.
+      logger.debug(
+          "cryptographic error occurred whilst verifying signature: {}",
           null == e.getMessage() ? "no further info available" : e.getMessage());
       return false;
     }
@@ -284,10 +299,15 @@ public class Credentialed {
    *
    * @param message the message data to be signed
    * @return a Base64-encoded signature
-   * @throws CryptoException if the private key could not be decrypted for signing
+   * @throws CryptoException if there is no private key, or it could not be decrypted
    */
   public String sign(String message) throws CryptoException {
-    if(null == privkey) return "";
+    // Previously returned "". An empty string is not a signature, and a caller that did
+    // not check got one anyway: yasss put it in a session ticket, which then failed
+    // verification somewhere else entirely, for a reason no log named.
+    if(null == privkey)
+      throw new CryptoException("No private key available to sign with.", null);
+
     byte[] msgBuf = message.getBytes(StandardCharsets.UTF_8);
 
     try {
