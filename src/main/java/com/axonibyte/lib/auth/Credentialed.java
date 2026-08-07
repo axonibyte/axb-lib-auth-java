@@ -119,6 +119,9 @@ public class Credentialed {
    */
   private static volatile KeyMaterial keys = null;
 
+  /** Defaults to on. See {@link TOTPReplayGuard} for why, and for its limits. */
+  private static volatile TOTPReplayGuard replayGuard = new TOTPReplayGuard.InMemory();
+
   /**
    * Sets the global secret used to encrypt private keys and MFA secrets at rest.
    *
@@ -340,31 +343,84 @@ public class Credentialed {
   }
 
   /**
-   * Verifies a TOTP provided by the user.
+   * Verifies a one-time password against this entity's enrolled MFA secret.
    *
-   * @return true if the TOTP is verified
+   * <p>Strictly one question: <em>is this code valid right now, and unspent?</em> An
+   * entity with no MFA secret has no valid codes, so the answer is {@code false}; a blank
+   * code is not a code, so that is {@code false} too. If what you need is "has the MFA
+   * requirement been satisfied", which is a different question with a different answer
+   * when nothing is enrolled, use {@link #isMFASatisfied(String)}.</p>
+   *
+   * <p>A code that verifies is then claimed against {@link #setTOTPReplayGuard}, so
+   * presenting the same one twice fails the second time. Claiming happens only after the
+   * code has proven valid: burning a slot on a wrong guess would let an attacker spend
+   * codes they do not have, and would make the guard usable as an oracle.</p>
+   *
+   * @param totp the one-time password
+   * @return true iff the code is valid for this entity and has not already been used
    */
   public boolean verifyTOTP(String totp) {
-    if(null == this.mfakey && (null == totp || totp.isBlank())) return true;
-    if(null == this.mfakey) return false;
-    
+    if(null == this.mfakey || null == totp || totp.isBlank()) return false;
+
     final TimeProvider timeProvider = new SystemTimeProvider();
     final CodeGenerator codeGenerator = new DefaultCodeGenerator();
     final CodeVerifier verifier = new DefaultCodeVerifier(codeGenerator, timeProvider);
 
     try {
-      return verifier.isValidCode(
+      boolean valid = verifier.isValidCode(
           new String(
               Base32.encode(
                   cryptop(this.mfakey, false)),
               StandardCharsets.US_ASCII),
           totp);
+
+      if(!valid) return false;
+
+      if(null == id) {
+        // The guard is keyed on the entity, and there is nothing to key on. Better to say
+        // so once than to invent an identity or refuse a legitimate code.
+        logger.debug("No entity ID available; skipping TOTP replay protection.");
+        return true;
+      }
+
+      if(replayGuard.claim(id, totp)) return true;
+
+      logger.info("Rejected an already-used TOTP for {}.", id);
+      return false;
+
     } catch(CryptoException e) {
       logger.error(
           "MFA key decryption failed: {}",
           null == e.getMessage() ? "no further info available" : e.getMessage());
       return false;
     }
+  }
+
+  /**
+   * Determines whether this entity's multi-factor requirement, if it has one, is met.
+   *
+   * <p>The lenient counterpart to {@link #verifyTOTP(String)}: an entity with no MFA
+   * secret has no requirement, so no code is needed and none being offered is fine. This
+   * exists because the two questions used to share one method, which answered
+   * {@code true} when there was nothing to verify -- an authentication bypass for any
+   * caller that used it as the sole gate -- and {@code false} when a caller passed a
+   * spurious code to an account with no MFA, which is the opposite surprise.</p>
+   *
+   * @param totp the one-time password, which may be {@code null} or blank
+   * @return true iff no MFA secret is enrolled, or one is and the code verifies
+   */
+  public boolean isMFASatisfied(String totp) {
+    if(null == this.mfakey) return true;
+    return verifyTOTP(totp);
+  }
+
+  /**
+   * Replaces the guard that prevents a one-time password being spent twice.
+   *
+   * @param guard the guard; {@code null} restores the default per-process guard
+   */
+  public static void setTOTPReplayGuard(TOTPReplayGuard guard) {
+    Credentialed.replayGuard = null == guard ? new TOTPReplayGuard.InMemory() : guard;
   }
 
   /**

@@ -160,9 +160,20 @@ public class CredentialedTest {
     final TimeProvider timeProvider = new SystemTimeProvider();
     final CodeGenerator codeGen = new DefaultCodeGenerator();
 
-    final String code = codeGen.generate(mfaSecret, Math.floorDiv(timeProvider.getTime(), 30));
-    Assert.assertTrue(credentialed_1.verifyTOTP(code));
-    Assert.assertTrue(credentialed_2.verifyTOTP(code));
+    // What is under test here is that the stored ciphertext round-trips: a Credentialed
+    // rebuilt from getEncMFASecret() verifies exactly what the original does. Presenting
+    // one code twice is how that is demonstrated, and it is also precisely what the
+    // replay guard exists to stop -- both objects carry the same entity ID, so the second
+    // call is a replay by the guard's definition and a correct one. Opt out for this
+    // test; CredentialedTOTPTest covers the guard itself.
+    Credentialed.setTOTPReplayGuard(TOTPReplayGuard.PERMISSIVE);
+    try {
+      final String code = codeGen.generate(mfaSecret, Math.floorDiv(timeProvider.getTime(), 30));
+      Assert.assertTrue(credentialed_1.verifyTOTP(code));
+      Assert.assertTrue(credentialed_2.verifyTOTP(code));
+    } finally {
+      Credentialed.setTOTPReplayGuard(null);
+    }
   }
   
 }
