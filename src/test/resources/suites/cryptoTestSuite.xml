@@ -6,6 +6,7 @@
     <classes>
       <class name="com.axonibyte.lib.auth.CredentialedTest" />
       <class name="com.axonibyte.lib.auth.CredentialedCryptoTest" />
+      <class name="com.axonibyte.lib.auth.CredentialedCharsetTest" />
       <class name="com.axonibyte.lib.auth.SessionEngineTest" />
     </classes>
   </test>

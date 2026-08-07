@@ -251,7 +251,12 @@ public class Credentialed {
    */
   public boolean verifySig(String message, String sig) {
     try {
-      byte[] msgBuf = message.getBytes();
+      // UTF-8 explicitly, not the platform default. The signing side is a browser, which
+      // always signs UTF-8 bytes; before Java 18 the default here comes from the host's
+      // locale, so on a non-UTF-8 host any message containing a non-ASCII character --
+      // a non-ASCII email address, in this scheme -- hashed to different bytes and the
+      // signature did not verify. The failure looks exactly like a wrong password.
+      byte[] msgBuf = message.getBytes(StandardCharsets.UTF_8);
       byte[] sigBuf = Base64.decode(sig);
     
       Signer verifier = new Ed25519Signer();
@@ -275,7 +280,7 @@ public class Credentialed {
    */
   public String sign(String message) throws CryptoException {
     if(null == privkey) return "";
-    byte[] msgBuf = message.getBytes();
+    byte[] msgBuf = message.getBytes(StandardCharsets.UTF_8);
 
     try {
       Signer signer = new Ed25519Signer();
@@ -284,7 +289,9 @@ public class Credentialed {
           new Ed25519PrivateKeyParameters(
               cryptop(this.privkey, false)));
       signer.update(msgBuf, 0, msgBuf.length);
-      return new String(Base64.encode(signer.generateSignature()));
+      // Base64 output is ASCII, so this is documentation rather than a fix -- but an
+      // unqualified new String(byte[]) should not be left for a reader to check.
+      return new String(Base64.encode(signer.generateSignature()), StandardCharsets.US_ASCII);
     } catch(Exception e) {
       throw new CryptoException("failed to sign message", e);
     }
@@ -321,7 +328,8 @@ public class Credentialed {
       return verifier.isValidCode(
           new String(
               Base32.encode(
-                  cryptop(this.mfakey, false))),
+                  cryptop(this.mfakey, false)),
+              StandardCharsets.US_ASCII),
           totp);
     } catch(CryptoException e) {
       logger.error(
