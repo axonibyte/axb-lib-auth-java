@@ -1,0 +1,127 @@
+# CI for the axb-lib Java libraries -- the shared template for the Java group
+# (axb-lib-{auth,cfg,db,http,wildcard}-java and tritaurian-archive-{api,bot}).
+#
+# Ported from rumor's .forgejo/workflows/ci.yml, and what carries over is not
+# about Go: ONE FreeBSD job; no actions/checkout; a timeout(1) on every
+# external call plus a timeout-minutes backstop; rc 124 reported separately
+# from a failure; `set -o pipefail`; redirect-then-read-status rather than a
+# pipe; a non-fatal probe first; and every step emitting a value only execution
+# could have produced.
+#
+# WHY freebsd-15-host AND NOT THE JAIL. Gradle's client and its daemon talk
+# over TCP, and the daemon accepts a connection only from an address where
+# isLoopbackAddress() is true -- i.e. 127/8. The ci jail is non-VNET with a
+# single address, 192.168.69.2, so the daemon REJECTS ITS OWN CLIENT:
+#     [ERROR] TcpIncomingConnector: Cannot accept connection from remote
+#     address /192.168.69.2
+# Measured on 2026-10-20, with three attempted fixes, all reverted: adding a
+# 127/8 secondary (Gradle finds it but still listens on localhost, which the
+# jail remaps); making the 127/8 address PRIMARY (fixes Gradle, BREAKS outbound
+# DNS, i.e. rumor's module downloads); and pointing /etc/hosts at it (the JVM
+# uses InetAddress.getLoopbackAddress(), hardcoded 127.0.0.1, which never reads
+# /etc/hosts). `--no-daemon` does not help: Gradle forks a single-use daemon to
+# honour the build's JVM settings, and matching those settings into GRADLE_OPTS
+# did not stop the fork. cal chose the host runner 2026-10-20 ("a is fine for
+# now"); a VNET jail is the better fix and needs fable's approval because it
+# touches rumor's CI network.
+#
+# JDK 17 BY NAME, NOT BY DEFAULT. openjdk17 and openjdk25 are both installed
+# and `java` resolves to 17 today, which is a fact about the host and not a
+# promise. JAVA_VERSION=17 asks javavmwrapper for 17 explicitly, and the probe
+# step PRINTS what it got, so a host-side change shows up as a changed value
+# rather than a silently different compiler. (JAVA_VERSION=25 does NOT work for
+# openjdk25 -- it is not registered with the wrapper; that one needs JAVA_HOME.)
+#
+# NO PUBLISH STEP YET, deliberately. cal settled the target -- Forgejo, both
+# the Maven package registry and a release asset -- but the runner has no
+# package-registry token, and a publish step that cannot authenticate is a step
+# that reports nothing. The tag-agreement gate below is the half that needs no
+# secret, so it ships now.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: freebsd-15-host
+    timeout-minutes: 30
+    steps:
+      - name: probe the runner (non-fatal; names what is absent)
+        run: |
+          set -o pipefail
+          echo "runner: $(uname -srm)"
+          for t in git java javac; do
+            p=$(command -v "$t" 2>/dev/null) || p=""
+            if [ -n "$p" ]; then echo "$t: $p"; else echo "$t: ABSENT"; fi
+          done
+          JAVA_VERSION=17 timeout 30 java -version 2>&1 | head -1 \
+            || echo "java 17: none or did not answer in 30s"
+
+      - name: fetch the tree with git, not a JS action
+        run: |
+          set -o pipefail
+          rc=0
+          timeout 180 git clone --quiet --depth 1 \
+            --branch "${GITHUB_REF_NAME:-main}" \
+            "${GITHUB_SERVER_URL:-https://forge.axonibyte.com}/${GITHUB_REPOSITORY}.git" \
+            src > clone.log 2>&1 || rc=$?
+          if [ "$rc" = 124 ]; then echo "clone did not answer in 180s"; exit 1; fi
+          if [ "$rc" != 0 ]; then echo "clone failed rc=$rc"; tail -5 clone.log; exit 1; fi
+          echo "HEAD: $(git -C src rev-parse --short HEAD)"
+          echo "tracked files: $(git -C src ls-files | wc -l | tr -d ' ')"
+
+      - name: the build and its tests
+        run: |
+          set -o pipefail
+          cd src
+          rc=0
+          JAVA_VERSION=17 timeout 900 ./gradlew --no-daemon --console=plain \
+            clean build > ../build.log 2>&1 || rc=$?
+          if [ "$rc" = 124 ]; then echo "gradle did not answer in 900s"; exit 1; fi
+          if [ "$rc" != 0 ]; then
+            echo "gradle rc=$rc"
+            grep -E "FAILURE|error:|FAILED|Cannot accept|daemon was empty" ../build.log | head -20
+            exit 1
+          fi
+          grep -E "^BUILD SUCCESSFUL" ../build.log || { echo "no BUILD SUCCESSFUL line"; exit 1; }
+
+      - name: the artifacts and the test counts, computed not asserted
+        run: |
+          set -o pipefail
+          cd src
+          jars=$(ls build/libs/*.jar 2>/dev/null | wc -l | tr -d ' ')
+          [ "$jars" -ge 1 ] || { echo "no jar in build/libs"; exit 1; }
+          for j in build/libs/*.jar; do
+            echo "$(basename "$j") $(wc -c < "$j" | tr -d ' ') bytes sha256=$(sha256 -q "$j")"
+          done
+          x=$(ls build/test-results/test/*.xml 2>/dev/null | wc -l | tr -d ' ')
+          [ "$x" -ge 1 ] || { echo "no test-results xml: the test task did not run"; exit 1; }
+          t=0; f=0; e=0; s=0
+          for r in build/test-results/test/*.xml; do
+            t=$((t + $(sed -n 's/.*tests="\([0-9]*\)".*/\1/p;' "$r" | head -1)))
+            f=$((f + $(sed -n 's/.*failures="\([0-9]*\)".*/\1/p;' "$r" | head -1)))
+            e=$((e + $(sed -n 's/.*errors="\([0-9]*\)".*/\1/p;' "$r" | head -1)))
+            s=$((s + $(sed -n 's/.*skipped="\([0-9]*\)".*/\1/p;' "$r" | head -1)))
+          done
+          echo "tests=$t failures=$f errors=$e skipped=$s across $x report(s)"
+          [ "$t" -gt 0 ] || { echo "zero tests ran, which is not a pass"; exit 1; }
+          [ "$f" = 0 ] && [ "$e" = 0 ] || { echo "the reports disagree with gradle's verdict"; exit 1; }
+
+      - name: on a tag, the tag and gradle.properties must agree
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -o pipefail
+          cd src
+          tag="${GITHUB_REF_NAME}"
+          ver=$(sed -n 's/^prjVer=//p' gradle.properties | head -1)
+          [ -n "$ver" ] || { echo "gradle.properties declares no prjVer"; exit 1; }
+          echo "tag=$tag prjVer=$ver"
+          case "$tag" in
+            "v$ver"|"$ver") echo "they agree" ;;
+            *) echo "REFUSED: tag $tag does not name version $ver"; exit 1 ;;
+          esac
