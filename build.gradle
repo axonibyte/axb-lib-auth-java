@@ -57,6 +57,27 @@ publishing {
       from components.java
     }
   }
+
+  // The forge is where artifacts go now. maven-publish stays -- it is what
+  // produces the POM, so a consumer gets this project's own dependencies
+  // transitively instead of a bare jar.
+  //
+  // CREDENTIALS COME FROM THE ENVIRONMENT AND ARE ABSENT LOCALLY ON PURPOSE:
+  // `gradle build` never touches this block, so a clone with no credential
+  // builds and tests exactly as CI does. Only `gradle publish` needs them, and
+  // in CI they are the axonibyte org secrets PACKAGE_USER / PACKAGE_TOKEN -- a
+  // real token, because the job's own token is answered 401 reqPackageAccess
+  // by the package registry (measured, run 344).
+  repositories {
+    maven {
+      name = "forge"
+      url = "https://forge.axonibyte.com/api/packages/axonibyte/maven"
+      credentials {
+        username = System.getenv("PACKAGE_USER") ?: ""
+        password = System.getenv("PACKAGE_TOKEN") ?: ""
+      }
+    }
+  }
 }
 
 test {

@@ -32,11 +32,37 @@
 # rather than a silently different compiler. (JAVA_VERSION=25 does NOT work for
 # openjdk25 -- it is not registered with the wrapper; that one needs JAVA_HOME.)
 #
-# NO PUBLISH STEP YET, deliberately. cal settled the target -- Forgejo, both
-# the Maven package registry and a release asset -- but the runner has no
-# package-registry token, and a publish step that cannot authenticate is a step
-# that reports nothing. The tag-agreement gate below is the half that needs no
-# secret, so it ships now.
+# PUBLISHING GOES TO THE FORGE'S OWN MAVEN REGISTRY, and maven-publish stays.
+# cal 2026-10-20: what gets dropped is the external target, not the plugin --
+# "we're migrating to forge. If you need credentials somewhere, it means we're
+# probably migrating away from it." The forge is the exception: it needs a
+# credential because it is ours to write to.
+#
+# maven-publish earns its place by producing a POM, so a consumer resolves this
+# project's own dependencies transitively instead of guessing at a bare jar.
+# build.gradle's publishing block points at
+#     https://forge.axonibyte.com/api/packages/axonibyte/maven
+# with PACKAGE_USER / PACKAGE_TOKEN read from the environment, absent locally on
+# purpose: `gradle build` never touches that block, so a clone with no
+# credential builds exactly like CI does.
+#
+# MEASURED BOTH DIRECTIONS 2026-10-20, before this shipped:
+#   `gradle publish` of axb-lib-wildcard-java -> BUILD SUCCESSFUL, and the forge
+#   then serves the jar (5419 bytes), the pom -- carrying slf4j-api as a runtime
+#   dependency -- and a synthesized maven-metadata.xml, all to an ANONYMOUS GET.
+#   axb-lib-http-java, with jitpack deleted from its repositories and the
+#   coordinate changed to com.axonibyte.lib.wildcard:axb-lib-wildcard-java:0.0.1,
+#   builds green (24 tests) resolving .jar/.pom/.module out of the forge; the
+#   same build fails "Could not find ... 9.9.9" when the version is absent,
+#   which is what proves resolution is live rather than a cached jitpack copy.
+#   THE JOB'S OWN TOKEN CANNOT DO IT: forgejo answers 401 reqPackageAccess to
+#   both auth forms (run 344, task 366), hence the org secrets.
+#
+# THE TAG IS THE TRIGGER, and two refusals guard it: the step below refuses a
+# tag that disagrees with gradle.properties' prjVer, and the publish step
+# refuses to run at all without a PACKAGE_TOKEN rather than reporting a publish
+# it did not do.
+
 name: ci
 
 on:
@@ -45,6 +71,7 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -125,3 +152,37 @@ jobs:
             "v$ver"|"$ver") echo "they agree" ;;
             *) echo "REFUSED: tag $tag does not name version $ver"; exit 1 ;;
           esac
+
+      - name: on a tag, publish to the forge's maven registry
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          PACKAGE_USER: ${{ secrets.PACKAGE_USER }}
+          PACKAGE_TOKEN: ${{ secrets.PACKAGE_TOKEN }}
+        run: |
+          set -o pipefail
+          cd src
+          [ -n "$PACKAGE_TOKEN" ] || { echo "no PACKAGE_TOKEN secret: refusing to report a publish that cannot happen"; exit 1; }
+          ver=$(sed -n 's/^prjVer=//p' gradle.properties | head -1)
+          name=$(sed -n 's/^prjName=//p' gradle.properties | head -1)
+          grp=$(sed -n 's/^prjGroup=//p' gradle.properties | head -1)
+          rc=0
+          JAVA_VERSION=17 timeout 300 ./gradlew --no-daemon --console=plain publish \
+            > ../publish.log 2>&1 || rc=$?
+          if [ "$rc" = 124 ]; then echo "publish did not answer in 300s"; exit 1; fi
+          if [ "$rc" != 0 ]; then
+            echo "publish rc=$rc"
+            grep -E "Could not|401|403|409|Received status code" ../publish.log | head -5
+            exit 1
+          fi
+          grep -E "^BUILD SUCCESSFUL" ../publish.log || { echo "no BUILD SUCCESSFUL from publish"; exit 1; }
+          # Read it back with no credential at all: published means SERVED, not
+          # merely accepted, and the jar served must be the jar we built.
+          base="${GITHUB_SERVER_URL:-https://forge.axonibyte.com}/api/packages/${GITHUB_REPOSITORY_OWNER}/maven/$(echo "$grp" | tr . /)/$name/$ver"
+          for f in "$name-$ver.jar" "$name-$ver.pom"; do
+            code=$(timeout 60 curl -sS -o "../got-$f" -w '%{http_code}' "$base/$f")
+            echo "anonymous GET $f -> $code, $(wc -c < "../got-$f" | tr -d ' ') bytes"
+            [ "$code" = 200 ] || { echo "the forge does not serve what we just published"; exit 1; }
+          done
+          cmp -s "build/libs/$name-$ver.jar" "../got-$name-$ver.jar" \
+            || { echo "the served jar is not the jar we built"; exit 1; }
+          echo "published and verified: $base"
