@@ -16,4 +16,4 @@ may be provided when documentation has been completed.
 
 ## License
 
-This library has been released under the [Apache-2.0 License](https://www.apache.org/licenses/LICENSE-2.0.html).
+This library's source code has been released under the [Blue Oak Model License 1.0.0](https://blueoakcouncil.org/license/1.0.0). See [LICENSE](LICENSE), which also names the terms covering specifications, documentation and assets.
